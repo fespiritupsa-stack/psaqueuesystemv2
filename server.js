@@ -46,7 +46,41 @@ let adminOTPs = {};
 let requeueTimers = {};
 
 // --- 2. GLOBAL QUEUE STATE ---
-let ticketSequences = { national: 1, civil: 1 };
+function createDefaultTicketSequences() {
+    return {
+        national: { regular: 1, priority: 1 },
+        civil: { regular: 1, priority: 1 }
+    };
+}
+
+function normalizeTicketSequences(savedSequences) {
+    const normalized = createDefaultTicketSequences();
+    const categories = ['regular', 'priority'];
+
+    for (const dept of Object.keys(normalized)) {
+        const savedDept = savedSequences?.[dept];
+
+        if (typeof savedDept === 'number') {
+            const nextNumber = Math.max(1, Math.floor(savedDept) || 1);
+            normalized[dept].regular = nextNumber;
+            normalized[dept].priority = nextNumber;
+            continue;
+        }
+
+        if (savedDept && typeof savedDept === 'object') {
+            for (const category of categories) {
+                const numericValue = Number(savedDept[category]);
+                normalized[dept][category] = Number.isFinite(numericValue) && numericValue > 0
+                    ? Math.floor(numericValue)
+                    : 1;
+            }
+        }
+    }
+
+    return normalized;
+}
+
+let ticketSequences = createDefaultTicketSequences();
 let ticketSequenceDate = getTodayString();
 let queueStore = {
     waiting: { national: [], civil: [] },
@@ -100,7 +134,7 @@ async function performDailyReset() {
         Object.values(requeueTimers).forEach(clearTimeout);
         requeueTimers = {};
 
-        ticketSequences = { national: 1, civil: 1 };
+        ticketSequences = createDefaultTicketSequences();
         ticketSequenceDate = today;
         queueStore.waiting = { national: [], civil: [] };
         queueStore.currentServing = {
@@ -122,7 +156,7 @@ async function resetTodayQueueCounters() {
         Object.values(requeueTimers).forEach(clearTimeout);
         requeueTimers = {};
 
-        ticketSequences = { national: 1, civil: 1 };
+        ticketSequences = createDefaultTicketSequences();
         ticketSequenceDate = getTodayString();
         queueStore.waiting = { national: [], civil: [] };
         queueStore.currentServing = {
@@ -222,7 +256,7 @@ async function connectDB() {
         const saved = await db.collection('system_state').findOne({ id: 'active_queue' }); 
         if (saved) {
             queueStore = saved.queueStore || queueStore;
-            ticketSequences = saved.ticketSequences || { national: 1, civil: 1 };
+            ticketSequences = normalizeTicketSequences(saved.ticketSequences);
             ticketSequenceDate = saved.ticketSequenceDate || getTodayString();
             if (ticketSequenceDate !== getTodayString()) {
                 await performDailyReset();
@@ -936,7 +970,7 @@ io.on('connection', (socket) => {
             Object.values(requeueTimers).forEach(clearTimeout);
             requeueTimers = {};
 
-            ticketSequences = { national: 1, civil: 1 };
+            ticketSequences = createDefaultTicketSequences();
             ticketSequenceDate = getTodayString();
             queueStore.waiting = { national: [], civil: [] };
             queueStore.currentServing = {
@@ -1000,8 +1034,11 @@ io.on('connection', (socket) => {
 
             const prefixes = { national: 'NID', civil: 'CR' };
             const prefix = prefixes[dept] || 'TKT';
-            const number = String(ticketSequences[dept] || 1).padStart(3, '0');
             const typeChar = isPriority ? 'P' : 'R';
+            const sequenceKey = isPriority ? 'priority' : 'regular';
+            ticketSequences = normalizeTicketSequences(ticketSequences);
+            const nextSequenceNumber = ticketSequences[dept][sequenceKey] || 1;
+            const number = String(nextSequenceNumber).padStart(3, '0');
             const label = `${prefix}-${typeChar}-${number}`;
             const typeCharDept = isPriority ? 'Priority' : 'Regular';
 
@@ -1018,7 +1055,7 @@ io.on('connection', (socket) => {
             };
 
             queueStore.waiting[dept].push(ticket);
-            ticketSequences[dept] = (ticketSequences[dept] || 1) + 1;
+            ticketSequences[dept][sequenceKey] = nextSequenceNumber + 1;
 
             await Promise.all([
                 logEvent('ticket_logs', { ...ticket, action: 'ISSUED' }),
